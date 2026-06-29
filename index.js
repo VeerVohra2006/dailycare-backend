@@ -1,8 +1,9 @@
-// ═══════════════════════════════════════════════════════════════
-//  DailyCare Backend  —  server/index.js  v4
+// ══════════════════════════════════════════════════════════════
+//  DailyCare Backend  —  server/index.js  v5
 //
 //  Endpoints:
 //    GET  /                  — health check
+//    GET  /ping              — UptimeRobot keep-alive (prevents Railway sleep)
 //    POST /save-subscription — receiver stores push sub (on-demand pings)
 //    POST /save-schedule     — senior stores sub + medicine schedule (cron)
 //    POST /send-push         — caregiver sends instant push to senior
@@ -13,6 +14,9 @@
 //
 //  Cron:
 //    Runs every minute, fires Web Push at each medicine time.
+//
+//  Keep-alive:
+//    UptimeRobot pings GET /ping every 5 min → server never sleeps on Railway.
 // ═══════════════════════════════════════════════════════════════
 
 const express  = require('express');
@@ -149,10 +153,26 @@ async function markFired(userId, medName, time) {
 app.get('/', async (_, res) => {
   const userIds = await getAllScheduleUserIds();
   res.json({
-    status:  'DailyCare backend running ✓',
-    storage: redis ? 'Redis' : 'in-memory',
-    schedules: userIds.length
+    status:    'DailyCare backend running ✓',
+    storage:   redis ? 'Redis' : 'in-memory',
+    schedules: userIds.length,
+    uptime:    Math.floor(process.uptime()) + 's'
   });
+});
+
+// ══════════════════════════════════════════════════════════════
+//  GET /ping  — UptimeRobot keep-alive endpoint
+//  UptimeRobot (free) hits this every 5 minutes.
+//  This prevents Railway free tier from sleeping,
+//  which would stop the cron job from running.
+//
+//  Setup (one-time, free):
+//    1. uptimerobot.com → free account
+//    2. Add Monitor → HTTP(s) → your Railway URL + /ping
+//    3. Interval: every 5 minutes
+// ══════════════════════════════════════════════════════════════
+app.get('/ping', (_, res) => {
+  res.json({ ok: true, time: new Date().toISOString() });
 });
 
 // ══════════════════════════════════════════════════════════════
@@ -286,6 +306,28 @@ cron.schedule('* * * * *', async () => {
 });
 
 console.log('[Cron] Scheduler started — fires every minute');
+
+// ══════════════════════════════════════════════════════════════
+//  SELF KEEP-ALIVE
+//  Backs up UptimeRobot — server pings itself every 4 minutes
+//  so the cron never stops even if UptimeRobot has a hiccup.
+//  Only runs when SELF_URL env var is set (your Railway URL).
+// ══════════════════════════════════════════════════════════════
+const SELF_URL = process.env.SELF_URL;
+if (SELF_URL) {
+  const https = require('https');
+  const http  = require('http');
+  setInterval(() => {
+    const url    = new URL(SELF_URL + '/ping');
+    const client = url.protocol === 'https:' ? https : http;
+    const req    = client.get(url.toString(), res => {
+      console.log(`[Keep-alive] Self-ping ${res.statusCode}`);
+    });
+    req.on('error', e => console.warn('[Keep-alive] Self-ping failed:', e.message));
+    req.end();
+  }, 4 * 60 * 1000); // every 4 minutes
+  console.log('[Keep-alive] Self-ping active →', SELF_URL + '/ping');
+}
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`DailyCare backend on port ${PORT}`));
